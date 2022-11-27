@@ -1,280 +1,179 @@
 import urllib.request
 import numpy as np
 from scipy.interpolate import splprep, splev
+import pandas as pd
+from tabulate import tabulate
 import plotly.graph_objects as go
 import plotly.express as px
+from time import perf_counter as pfc
 
-np.set_printoptions(formatter={'float': '{:0.3f}'.format})
+start = pfc()
+tip_url = "http://airfoiltools.com/airfoil/seligdatfile?airfoil=prandtl-d-tip-ns"
+root_url = "http://airfoiltools.com/airfoil/seligdatfile?airfoil=sp4621hp-po"
+span = 1500
+segments = 5000
+span_percents = []
 
-interval_count = 800
-interval_step = 50
 
-
-def gen_url_pts(url):
-    """
-
-    :param url: URL of airfoil -from AirfoilTools.com
-    :return: List of XY coordinates defining the airfoil
-    """
+def gen_from_URL(url):
     return np.genfromtxt(urllib.request.urlopen(url), skip_header=1, dtype="float").T
 
 
-def equalizer(r, t):
-    """
-    :param r: First Array [x,y]
-    :param t: Second Array [x,y]
-    :return: Generates 2 equally sized arrays using spline interpolation
-    """
-    pts = 30
+def coord_coupling(x, y, z):
+    return pd.DataFrame(
+        {
+            "X": x,
+            "Y": y,
+            "Z": z
+        }
+    ).T
 
-    u_new = np.linspace(0, 1, pts)
 
-    # r interp
+# kinda the same as spline
+def equalizer(r, t, q=None, **kwargs):
+    """
+    :param r:1st Set of AF Coords
+    :param t:2nd Set of AF Coords
+    :param q:Amount of points (optional)
+    :return: 2 sets of Coords with equal length & AF starting and ending at (1,0),(0,0)
+    """
+    ep = kwargs.get('setEndPoints', False)
+    if q is None:
+        q = 30
+    # defines the number of pts/the smoothness
+    u_new = np.linspace(0, 1, q)
+
+    # root interp
     root_tck, u = splprep([r[0], r[1]], s=0)[:3]
     new_r = splev(u_new, root_tck)
 
-    # t interp
+    # tip interp
     tip_tck, u = splprep([t[0], t[1]], s=0)[:3]
     new_t = splev(u_new, tip_tck)
 
+    # root start & finish normalised
+    if ep:
+        new_r = correct_ends(new_r)
+        new_t = correct_ends(new_t)
     return new_r, new_t
 
 
-class Section:
-    def __init__(self, tc: float, rc: float, hs: float, splq: int, tu: str, ru: str, swp: float = None):
-        """
-
-        :param tc: Tip Chord
-        :param rc: Root Chord
-        :param hs: Half Span
-        :param splq: Spline Quality
-        :param tu: Tip URL
-        :param ru: Root URL
-        :param swp: Sweep
-        """
-        self.root_url = ru
-        self.tip_url = tu
-        self.spline_quality = splq
-        self.tip_chord = tc
-        self.root_chord = rc
-        self.hs = hs
-        self.sweep = swp
-        self.root, self.tip = self.rt_scale()
-
-        self.span_positions = self.span_pos(interval_count, interval_step)
-        self.span_percents = self.span_percents()
-        self.afs = self.create_foils()
-        self.afs = self.wing_twister()
-        self.sweeper()
-
-    def mirror(self):
-        mrd_pts = np.flipud(self.afs)
-        copy_afs = np.concatenate((self.afs, mrd_pts))
-        return copy_afs
-
-    def rt_scale(self):
-        r1 = gen_url_pts(self.root_url)
-        t1 = gen_url_pts(self.tip_url)
-        r2, t2 = equalizer(r1, t1)
-        nr, nt = np.array(list(scale(self.root_chord, np.array(r2)))), \
-                 np.array(list(scale(self.tip_chord, np.array(t2))))
-        return nr, nt
-
-    def span_pos(self, ic=None, isp=None):
-        """
-        :param ic: Amount of Intervals
-        :param isp: interval Step
-        :return: Span Positions i.e. Array of Coordinates evenly distributed along span
-        """
-        return np.linspace(0, self.hs, ic) if ic else np.arange(0, self.hs, isp)
-
-    def span_percents(self):
-        """
-        :return: List of percentages of span position to half span
-        """
-        return [(100 - sp * 100 / self.hs) for sp in self.span_positions]
-
-    def create_foils(self):
-        """
-        :return: Array of afs between root and tip
-        """
-        return np.array([inter(self.root, self.tip, foo) for foo in self.span_percents])
-
-    def sweeper(self):
-        """
-        :return: Coordinates translated to account for sweep
-        """
-        x_loc = np.linspace(0, self.hs * np.tan(np.deg2rad(self.sweep)), len(self.afs))
-
-        for foo in range(interval_count):
-            self.afs[foo][0] = list(map(lambda bar: bar + x_loc[foo], self.afs[foo][0]))
-        pass
-
-    def plot_af(self, clrs=None):
-        """
-        :param clrs: list of colors for wing colorscale
-        :return: Plots Airfoils
-        """
-
-        if clrs is None:
-            clrs = list(["#FF4F00", "#00407A"])
-
-        # making colorscale
-        color_scale_length = np.linspace(0, 1, len(self.span_positions))
-
-        unique_color_scale = px.colors.make_colorscale(clrs)
-        color_scale = px.colors.sample_colorscale(unique_color_scale, list(color_scale_length))
-
-        color_scale[0] = color_scale[-1]
-        color_scale[-1] = color_scale[1]
-        for i, af in enumerate(self.afs):
-            # print(af[0], af[1], np.full(len(af[0]), self.span_positions[i]), sep="\n", end="\n\n\n")
-            x, y = spline(af[0], af[1], self.spline_quality)
-            z = np.full(self.spline_quality, self.span_positions[i])
-
-            fig.add_trace(go.Scatter3d(x=x, y=y, z=z,
-                                       name=str(round((100 - self.span_percents[i]), 2)) + "%",
-                                       mode='lines',
-                                       line_color=color_scale[i],
-                                       line=dict(width=3)))
-
-            # fig.update_traces(line={'size': 10})
-
-            # if mirror is True:
-        for i, af in enumerate(self.afs):
-            # print(af[0], af[1], np.full(len(af[0]), self.span_positions[i]), sep="\n", end="\n\n\n")
-            x, y = spline(af[0], af[1], self.spline_quality)
-            z = np.full(self.spline_quality, self.span_positions[i])
-
-            fig.add_trace(go.Scatter3d(x=x, y=y, z=-z,
-                                       name=str(round((100 - self.span_percents[i]), 2)) + "%",
-                                       mode='lines',
-                                       line_color=color_scale[i],
-                                       line=dict(width=5)))
-
-            # fig.update_traces(line={'size': 10})
-
-        fig.update_layout(legend=dict(y=1.0, traceorder='reversed', font_size=16),
-                          scene=dict(
-                              aspectratio=dict(
-                                  x=5, y=1, z=20),
-                              xaxis=dict(range=[-15, 75]),
-                              yaxis=dict(range=[-18, 18]),
-                              zaxis=dict(range=[-180, 180])
-
-                          ))
-        # if mirror is True:
-        fig.show()
-
-    def wing_twister(self, **kwargs):
-        """
-
-        :param kwargs:-Twist_distribution i.e. type of twist.
-                       :-Twist angle in radians
-
-        :return: Rotated Airfoils
-        """
-        max_twist = None
-        if max_twist is None:
-            max_twist = 0.4
-        twist = np.geomspace(max_twist, 1, len(self.span_positions)) - 0.8
-
-        return [rotation(angle, xy) for angle, xy in zip(twist, self.afs)]
+def correct_ends(xy):  # sourcery skip: min-max-identity
+    if (xy[0] > 1).sum() > 1:
+        print("Scale Aifoils Down")
+        # TODO: auto scale AF to fit
+        raise ValueError('airfoil has too many points outside bounds xmax=1,xmin=0')
+    xy[0] = [0 if x < 0 else 1 if x > 1 else x for x in xy[0]]
+    xy[0][xy[0].index(min(xy[0]))] = 0  # Sets the min val of x to 0
+    xy[1][0] = 0
+    xy[1][-1] = 0
+    return xy
 
 
-def inter(r, t, sp):
-    return t + (r - t) * sp / 100
-
-
-def plot(pts, clrs=None):
+def spline(x, y, sq):
     """
-
-    :param pts:[[x][y][z]]
-    :param clrs: Colors used to create the wing color contour
-    :return: Plots the wing
-    """
-    # making colorscale
-    color_scale_length = np.linspace(0, 1, len(pts[0]))
-    unique_color_scale = px.colors.make_colorscale(clrs)
-    color_scale = px.colors.sample_colorscale(unique_color_scale, list(color_scale_length))
-    color_scale[0] = color_scale[-1]
-
-    for i, af in enumerate(pts):
-        # print(af[0], af[1], np.full(len(af[0]), self.span_positions[i]), sep="\n", end="\n\n\n")
-        x, y, z = pts
-        fig.add_trace(go.Scatter3d(x=x, y=y, z=z,
-                                   mode='lines',
-                                   line_color=color_scale[i],
-                                   line=dict(width=10)))
-
-        # fig.update_traces(line={'size': 10})
-
-        fig.update_layout(legend=dict(y=1.0, traceorder='reversed', font_size=16),
-                          scene=dict(
-                              aspectratio=dict(
-                                  x=5, y=1, z=10),
-                              xaxis=dict(range=[-15, 75]),
-                              yaxis=dict(range=[-18, 18]),
-                              zaxis=dict(range=[0, 180])
-
-                          ))
-    fig.show()
-    pass
-
-
-def spline(x, y, quality):
-    """
-
-    :param x: X-Coordinates
-    :param y: Y-Coordinates
-    :param quality: Spline Quality
-    :return: New set of XY points
+    :param x: Set of X-Coords
+    :param y: Set of Y-Coords
+    :param sq: Spline Quality
+    :return: New set of points generated using Spline Interpolation
     """
     tck, u = splprep([x, y], s=0)[:3]
-    u_new = np.linspace(0, 1, quality)
+    u_new = np.linspace(0, 1, sq)
     x, y = splev(u_new, tck)
+
+    y[0], y[-1] = 0, 0
+
     return x, y
 
 
-def scale(scale_factor, pts):
+def inter(r, t, sp):
     """
-    :param scale_factor: Enough Said
-    :param pts: List of coordinates
-    :return: Scaled list of coordinates
+    :param r:Root Coords
+    :param t:Tip Coords
+    :param sp: Span Percent
+    :return:
     """
-    return map(lambda x: x * scale_factor, pts)
+    return t + (r - t) * sp / 100
 
 
-def rotation(alfa, array):
+def populate(r, t, s, n, sq, **kwargs):
     """
-    :param alfa: Rotation Angle
-    :param array: Array to rotate
-    :return: Rotated Array
+    :param sq: Spline Quality Final
+    :param r:Root Coords
+    :param t:Tip Coords
+    :param s: Section Span
+    :param n: Number of intervals
+    :return:
     """
-    rot = np.array([[np.cos(alfa), -np.sin(alfa)], [np.sin(alfa), np.cos(alfa)]])
-    translation1 = np.array([[1, 0, -array[0][0]], [0, 1, -array[1][0]], [0, 0, 1]])
-    translation2 = np.array([[1, 0, array[0][0]], [0, 1, array[1][0]], [0, 0, 1]])
-    array = np.array([array[0], array[1], len(array[1]) * [1]])
-    array = np.matmul(translation1, array)
-    array = np.delete(array, 2, 0)
-    array = np.matmul(rot, array)
-    row = len(array[1]) * [1]
-    array = np.vstack([array, row])
-    array = np.matmul(translation2, array)
-    array = np.delete(array, 2, 0)
-    return array
+    # TODO: Speed this up, prior version was 10x faster
+    incl_tip = kwargs.get('inclTip', False)
+    foo = []
+    span_pos = np.linspace(0, s, n)
+    span_per = [100 - i * 100 / s for i in span_pos]
+    for i in range(n):
+        xyz = inter(r, t, span_per[n - 1 - i])
+
+        xyz = coord_coupling(xyz[0], xyz[1], xyz[2])
+        foo.append(xyz)
+    # if kwargs.get('inclTip', False):
+    #     new_t = spline(t[0],t[1],sq)
+    #     foo.append(coord_coupling(new_t[0],new_t[1],100))
+    #
+
+    return pd.concat(foo, keys=span_per)
+
+    # r = coord_coupling(r[0], r[1], 1)
+    # t = coord_coupling(t[0], t[1], 5)
 
 
-tip_chord = 5
-root_chord = 15
-half_span = 50
-af_pts = 50
-sweep = 40
-spline_quality = 5
-y_range = int(root_chord / 2)
-tip_url = "http://airfoiltools.com/airfoil/seligdatfile?airfoil=goe244-il"
-root_url = "http://airfoiltools.com/airfoil/seligdatfile?airfoil=marsden-il"
+def initial(r_url, t_url,**kwargs):
+    sq = kwargs.get('SplineQuality', 30)
+    r = gen_from_URL(r_url)
+    t = gen_from_URL(t_url)
+    r, t = equalizer(r, t,sq)
+    r, t = correct_ends(r), correct_ends(t)
+    r.append([0 for _ in range(len(t[0]))])
+    t.append([span for _ in range(len(t[0]))])
+    return np.array(r), np.array(t)
 
-fig = go.Figure()
-span = Section(tip_chord,root_chord,half_span, 40, tip_url, root_url, 12)
-span.plot_af()
+
+def sweep(r, t, angle):
+    """
+    :param r: Root coords
+    :param t: Tip coords
+    :param angle: Sweep angle
+    :return: New tip coords
+    """
+    # TODO: write function to apply sweep to the tip airfoil
+
+    return r, t
+
+
+# TODO: write dihedral method that accepts 2 sets of coordinates and an angle
+#   and translates the 2nd set of points
+#   (Only changes yz, z-points must remain || to xy plane )
+
+# TODO: write twist method that applies a given twist to each section
+#  (only changes xy, z-points must remain || to xy plane )
+
+# TODO: write method to generate points from a
+#  6th degree polynomial or any better function
+#  that can describe a wide variety of twists
+
+def writeFile(df,writePath):
+    with open(writePath, 'w') as f:
+        dfAsString = df.to_string(header=False, index=False)
+        f.write(dfAsString)
+
+
+root, tip = initial(root_url, tip_url,SplineQuality=200)
+
+sections = populate(root, tip, span, segments, 200)
+#save_location = "C:/Users/garet/OneDrive - KU Leuven/Desktop/Coding/Python/Passage.txt"
+#writeFile(sections,save_location)
+print(sections)
+dur = pfc() - start
+print(dur)
+
+
+
