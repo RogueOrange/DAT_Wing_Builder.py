@@ -6,13 +6,14 @@ from tabulate import tabulate
 import plotly.graph_objects as go
 import plotly.express as px
 from time import perf_counter as pfc
+import csv
 
-start = pfc()
-tip_url = "http://airfoiltools.com/airfoil/seligdatfile?airfoil=prandtl-d-tip-ns"
-root_url = "http://airfoiltools.com/airfoil/seligdatfile?airfoil=sp4621hp-po"
-span = 1500
-segments = 5000
+tip_url = "http://airfoiltools.com/airfoil/seligdatfile?airfoil=ah63k127-il"
+root_url = "http://airfoiltools.com/airfoil/seligdatfile?airfoil=goe570-il"
+span = 6
+segments = 10
 span_percents = []
+start = pfc()
 
 
 def gen_from_URL(url):
@@ -96,6 +97,10 @@ def inter(r, t, sp):
     return t + (r - t) * sp / 100
 
 
+def rot_matrix(x, y, z):
+    pass
+
+
 def populate(r, t, s, n, sq, **kwargs):
     """
     :param sq: Spline Quality Final
@@ -112,8 +117,11 @@ def populate(r, t, s, n, sq, **kwargs):
     span_per = [100 - i * 100 / s for i in span_pos]
     for i in range(n):
         xyz = inter(r, t, span_per[n - 1 - i])
+        xyz[0][-1] = xyz[0][0]
+        xyz[1][-1] = xyz[1][0]
 
         xyz = coord_coupling(xyz[0], xyz[1], xyz[2])
+
         foo.append(xyz)
     # if kwargs.get('inclTip', False):
     #     new_t = spline(t[0],t[1],sq)
@@ -126,15 +134,13 @@ def populate(r, t, s, n, sq, **kwargs):
     # t = coord_coupling(t[0], t[1], 5)
 
 
-def initial(r_url, t_url,**kwargs):
-    sq = kwargs.get('SplineQuality', 30)
-    r = gen_from_URL(r_url)
-    t = gen_from_URL(t_url)
-    r, t = equalizer(r, t,sq)
-    r, t = correct_ends(r), correct_ends(t)
-    r.append([0 for _ in range(len(t[0]))])
-    t.append([span for _ in range(len(t[0]))])
-    return np.array(r), np.array(t)
+def initial(r_url, t_url, **kwargs):
+    r, t = equalizer(gen_from_URL(r_url),
+                     gen_from_URL(t_url),
+                     kwargs.get('SplineQuality', 30),
+                     setEndPoints=True)
+    return np.array(r.append([0 for _ in range(len(t[0]))])), \
+           np.array(t.append([span for _ in range(len(t[0]))]))
 
 
 def sweep(r, t, angle):
@@ -160,20 +166,31 @@ def sweep(r, t, angle):
 #  6th degree polynomial or any better function
 #  that can describe a wide variety of twists
 
-def writeFile(df,writePath):
+
+def writeFile(df, writePath):
     with open(writePath, 'w') as f:
         dfAsString = df.to_string(header=False, index=False)
         f.write(dfAsString)
 
 
-root, tip = initial(root_url, tip_url,SplineQuality=200)
+def write_csv(df, writePath):
+    np.savetxt(writePath, df.to_numpy(dtype='double'), delimiter=',')
 
-sections = populate(root, tip, span, segments, 200)
-#save_location = "C:/Users/garet/OneDrive - KU Leuven/Desktop/Coding/Python/Passage.txt"
-#writeFile(sections,save_location)
-print(sections)
+
+root, tip = initial(root_url, tip_url, SplineQuality=20)
+sections = populate(root, tip, span, segments, 8)
+
 dur = pfc() - start
+print(sections)
 print(dur)
 
+save_location = "C:/Users/garet/OneDrive - KU Leuven/Desktop/Coding/Python/Passage.txt"
+write_csv(sections, save_location)
 
-
+with open(save_location, 'r') as csvfile:
+    reader = csv.reader(csvfile, delimiter=',')
+    rawData = list(reader)
+    chunk_size = 3
+    rawData = [rawData[i:i + chunk_size] for i in range(0, len(rawData), chunk_size)]
+    rawData = [(list(map(float, j)) for j in i) for i in rawData]
+    data = [list(zip(*i)) for i in rawData]
